@@ -106,6 +106,8 @@ function App() {
   const pendingDeleteRef = useRef(new Set())
   const locallyDeletedRef = useRef(new Set())
   const realtimeChannelRef = useRef(null)
+  const pointersRef = useRef(new Map())
+  const pinchRef = useRef(null)
   const [mode, setMode] = useState('draw')
   const [zoom, setZoom] = useState(1)
   const [centerLabel, setCenterLabel] = useState('Center 0.0, 0.0')
@@ -503,7 +505,6 @@ function App() {
       strokeHistoryRef.current.delete(action.strokeId)
       redoStackRef.current.push({ type: 'draw', entry })
       trimActionStack(redoStackRef.current)
-      console.log('went back to', action.strokeId)
       return
     }
     if (action.type === 'erase') {
@@ -536,7 +537,6 @@ function App() {
       undoStackRef.current.push({ type: 'draw', strokeId: stroke.strokeId })
       trimActionStack(undoStackRef.current)
       broadcastUpsert([stroke])
-      console.log('went front to', stroke.strokeId)
       requestRender()
       return
     }
@@ -623,10 +623,30 @@ function App() {
     if (document.activeElement !== canvas) {
       canvas.focus()
     }
+    if (event.pointerType === 'touch') {
+      event.preventDefault()
+    }
+    const point = getCanvasPoint(event)
+    pointersRef.current.set(event.pointerId, point)
+
+    if (pointersRef.current.size === 2) {
+      finishPointerAction()
+      const points = Array.from(pointersRef.current.values())
+      const a = points[0]
+      const b = points[1]
+      pinchRef.current = {
+        center: { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 },
+        distance: Math.hypot(a.x - b.x, a.y - b.y),
+        view: { ...viewRef.current },
+      }
+      pointerRef.current = { drawing: false, panning: false, erasing: false, last: null }
+      setIsPointerDown(true)
+      return
+    }
+
     canvas.setPointerCapture(event.pointerId)
     setIsPointerDown(true)
     const isPan = mode === 'pan' || event.button === 1 || event.button === 2
-    const point = getCanvasPoint(event)
     cursorRef.current = { active: true, x: point.x, y: point.y }
     if (isPan) {
       pointerRef.current = { panning: true, drawing: false, erasing: false, last: point }
@@ -652,8 +672,34 @@ function App() {
   }
 
   const handlePointerMove = (event) => {
+    if (event.pointerType === 'touch') {
+      event.preventDefault()
+    }
     const point = getCanvasPoint(event)
     cursorRef.current = { active: true, x: point.x, y: point.y }
+    if (pointersRef.current.has(event.pointerId)) {
+      pointersRef.current.set(event.pointerId, point)
+    }
+    if (pinchRef.current && pointersRef.current.size >= 2) {
+      const points = Array.from(pointersRef.current.values())
+      const a = points[0]
+      const b = points[1]
+      const center = { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 }
+      const distance = Math.hypot(a.x - b.x, a.y - b.y)
+      const start = pinchRef.current
+      if (start.distance > 0) {
+        const nextScale = clamp(start.view.scale * (distance / start.distance), 0.2, 6)
+        const worldCenterX = start.view.x + start.center.x / start.view.scale
+        const worldCenterY = start.view.y + start.center.y / start.view.scale
+        viewRef.current.scale = nextScale
+        viewRef.current.x = worldCenterX - center.x / nextScale
+        viewRef.current.y = worldCenterY - center.y / nextScale
+        clampView()
+        setZoom(nextScale)
+        requestRender()
+      }
+      return
+    }
     requestRender()
     if (!pointerRef.current.drawing && !pointerRef.current.panning && !pointerRef.current.erasing) return
 
@@ -753,7 +799,7 @@ function App() {
     }
   }
 
-  const handlePointerUp = () => {
+  function finishPointerAction() {
     if (pointerRef.current.drawing) {
       const stroke = currentStrokeRef.current
       if (stroke && stroke.points.length >= 2) {
@@ -767,7 +813,6 @@ function App() {
           redoStackRef.current.length = 0
           const entry = { stroke: { ...stroke }, tileCoords: coords }
           strokeHistoryRef.current.set(stroke.strokeId, entry)
-          console.log('draw id', stroke.strokeId)
         }
       }
     }
@@ -777,10 +822,34 @@ function App() {
     requestRender()
   }
 
-  const handlePointerLeave = () => {
+  const handlePointerUp = (event) => {
+    if (event?.pointerType === 'touch') {
+      event.preventDefault()
+    }
+    if (event?.pointerId !== undefined) {
+      pointersRef.current.delete(event.pointerId)
+    }
+    if (pinchRef.current) {
+      if (pointersRef.current.size < 2) {
+        pinchRef.current = null
+      }
+      if (pointersRef.current.size > 0) {
+        return
+      }
+    }
+    finishPointerAction()
+  }
+
+  const handlePointerLeave = (event) => {
+    if (event?.pointerType === 'touch') {
+      event.preventDefault()
+    }
     cursorRef.current = { active: false, x: 0, y: 0 }
-    setIsPointerDown(false)
-    handlePointerUp()
+    if (event?.pointerId !== undefined) {
+      pointersRef.current.delete(event.pointerId)
+    }
+    pinchRef.current = null
+    finishPointerAction()
   }
 
   const handleWheel = (event) => {
@@ -1160,6 +1229,7 @@ function App() {
         onPointerDown={handlePointerDown}
         onPointerMove={handlePointerMove}
         onPointerUp={handlePointerUp}
+        onPointerCancel={handlePointerUp}
         onPointerLeave={handlePointerLeave}
         onContextMenu={(event) => event.preventDefault()}
       />
