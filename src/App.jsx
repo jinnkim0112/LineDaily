@@ -8,8 +8,6 @@ const STROKE_WIDTH = 3
 const MIN_POINT_DIST = 2
 const RDP_EPSILON = 1.5
 const DEVICE_ID_KEY = 'linedaily_device_id'
-const DAILY_BOX_SIZE = 100
-const DAILY_REGION_KEY = 'linedaily_daily_region'
 
 const SUPABASE_URL = import.meta.env.VITE_SUPABASE_URL
 const SUPABASE_ANON_KEY = import.meta.env.VITE_SUPABASE_ANON_KEY
@@ -72,30 +70,6 @@ function tileKey(tx, ty) {
   return `${tx},${ty}`
 }
 
-function getTodayKey() {
-  return new Date().toLocaleDateString('en-CA')
-}
-
-function loadDailyRegion() {
-  if (typeof window === 'undefined') return null
-  const raw = localStorage.getItem(DAILY_REGION_KEY)
-  if (!raw) return null
-  try {
-    const parsed = JSON.parse(raw)
-    if (parsed?.date === getTodayKey() && parsed?.region) {
-      return parsed.region
-    }
-  } catch {
-    return null
-  }
-  return null
-}
-
-function saveDailyRegion(region) {
-  if (typeof window === 'undefined') return
-  const payload = { date: getTodayKey(), region }
-  localStorage.setItem(DAILY_REGION_KEY, JSON.stringify(payload))
-}
 
 function App() {
   const canvasRef = useRef(null)
@@ -111,7 +85,6 @@ function App() {
   const [mode, setMode] = useState('draw')
   const [zoom, setZoom] = useState(1)
   const [realtimeEnabled] = useState(Boolean(supabase))
-  const dailyRegionRef = useRef(loadDailyRegion())
 
   const requestRender = () => {
     if (rafRef.current) return
@@ -241,7 +214,6 @@ function App() {
     const dpr = window.devicePixelRatio || 1
     const width = canvas.width / dpr
     const height = canvas.height / dpr
-    refreshDailyRegion()
 
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0)
     ctx.clearRect(0, 0, width, height)
@@ -342,26 +314,6 @@ function App() {
       ctx.stroke()
     }
 
-    const dailyRegion = dailyRegionRef.current
-    if (dailyRegion) {
-      const regionX = (dailyRegion.x - view.x) * view.scale
-      const regionY = (dailyRegion.y - view.y) * view.scale
-      const regionSize = DAILY_BOX_SIZE * view.scale
-      ctx.save()
-      ctx.fillStyle = 'rgba(0,0,0,0.2)'
-      ctx.fillRect(0, 0, width, height)
-      ctx.clearRect(regionX, regionY, regionSize, regionSize)
-      ctx.strokeStyle = 'rgba(0,0,0,0.45)'
-      ctx.lineWidth = 1
-      ctx.strokeRect(
-        regionX + 0.5,
-        regionY + 0.5,
-        Math.max(0, regionSize - 1),
-        Math.max(0, regionSize - 1),
-      )
-      ctx.restore()
-    }
-
     scheduleVisibleLoad()
   }
 
@@ -390,39 +342,6 @@ function App() {
     return { x, y }
   }
 
-  const refreshDailyRegion = () => {
-    const stored = loadDailyRegion()
-    if (!stored && dailyRegionRef.current) {
-      dailyRegionRef.current = null
-    }
-    if (stored && !dailyRegionRef.current) {
-      dailyRegionRef.current = stored
-    }
-  }
-
-  const setDailyRegionFromPoint = (worldPoint) => {
-    const baseX = Math.floor(worldPoint.x / DAILY_BOX_SIZE) * DAILY_BOX_SIZE
-    const baseY = Math.floor(worldPoint.y / DAILY_BOX_SIZE) * DAILY_BOX_SIZE
-    const region = {
-      x: clamp(baseX, 0, WORLD_SIZE - DAILY_BOX_SIZE),
-      y: clamp(baseY, 0, WORLD_SIZE - DAILY_BOX_SIZE),
-    }
-    dailyRegionRef.current = region
-    saveDailyRegion(region)
-    requestRender()
-    return region
-  }
-
-  const isPointInRegion = (point, region) => {
-    if (!region) return true
-    return (
-      point.x >= region.x &&
-      point.y >= region.y &&
-      point.x <= region.x + DAILY_BOX_SIZE &&
-      point.y <= region.y + DAILY_BOX_SIZE
-    )
-  }
-
   const clampView = () => {
     const canvas = canvasRef.current
     if (!canvas) return
@@ -444,19 +363,12 @@ function App() {
     canvas.setPointerCapture(event.pointerId)
     const isPan = mode === 'pan' || event.button === 1 || event.button === 2
     const point = getCanvasPoint(event)
-    refreshDailyRegion()
-
     if (isPan) {
       pointerRef.current = { panning: true, drawing: false, last: point }
       return
     }
 
     const worldPoint = screenToWorld(point)
-    let region = dailyRegionRef.current
-    if (!region) {
-      region = setDailyRegionFromPoint(worldPoint)
-    }
-    if (!isPointInRegion(worldPoint, region)) return
     currentStrokeRef.current = {
       strokeId: crypto.randomUUID(),
       userId: deviceIdRef.current,
@@ -484,7 +396,6 @@ function App() {
     }
 
     const worldPoint = screenToWorld(point)
-    if (!isPointInRegion(worldPoint, dailyRegionRef.current)) return
     const stroke = currentStrokeRef.current
     if (!stroke) return
     const lastPoint = stroke.points[stroke.points.length - 1]
@@ -531,7 +442,6 @@ function App() {
     event.preventDefault()
     const canvas = canvasRef.current
     if (!canvas) return
-    refreshDailyRegion()
     const view = viewRef.current
     const delta = -event.deltaY
     const scaleFactor = delta > 0 ? 1.1 : 0.9
