@@ -98,6 +98,7 @@ function App() {
   const deleteInFlightRef = useRef(new Set())
   const toolDockRef = useRef(null)
   const dragRef = useRef({ active: false, offsetX: 0, offsetY: 0 })
+  const historyDockRef = useRef(null)
   const cursorRef = useRef({ active: false, x: 0, y: 0 })
   const copyTimeoutRef = useRef(null)
   const undoStackRef = useRef([])
@@ -113,11 +114,15 @@ function App() {
   const [centerLabel, setCenterLabel] = useState('Center 0.0, 0.0')
   const [realtimeEnabled] = useState(Boolean(supabase))
   const [toolPos, setToolPos] = useState({ x: 16, y: 16 })
+  const [toolDockHeight, setToolDockHeight] = useState(0)
   const [drawColor, setDrawColor] = useState('#111111')
   const [drawSize, setDrawSize] = useState(3)
   const [eraseSize, setEraseSize] = useState(18)
   const [isPointerDown, setIsPointerDown] = useState(false)
   const [colorCopied, setColorCopied] = useState(false)
+  const [dockCollapsed, setDockCollapsed] = useState(false)
+  const [showPanHud, setShowPanHud] = useState(true)
+  const [showHistoryDock, setShowHistoryDock] = useState(true)
   const colorOptions = ['#111111', '#2b2b2b', '#5a5a5a', '#8a8a8a', '#c0392b', '#e67e22', '#f1c40f', '#27ae60', '#2980b9', '#8e44ad']
 
   const requestRender = () => {
@@ -970,15 +975,16 @@ function App() {
 
   useEffect(() => {
     const handleMove = (event) => {
-      if (!dragRef.current.active) return
-      const dock = toolDockRef.current
-      const width = dock?.offsetWidth ?? 0
-      const height = dock?.offsetHeight ?? 0
-      const maxX = Math.max(12, window.innerWidth - width - 12)
-      const maxY = Math.max(12, window.innerHeight - height - 12)
-      const nextX = clamp(event.clientX - dragRef.current.offsetX, 12, maxX)
-      const nextY = clamp(event.clientY - dragRef.current.offsetY, 12, maxY)
-      setToolPos({ x: nextX, y: nextY })
+      if (dragRef.current.active) {
+        const dock = toolDockRef.current
+        const width = dock?.offsetWidth ?? 0
+        const height = dock?.offsetHeight ?? 0
+        const maxX = Math.max(12, window.innerWidth - width - 12)
+        const maxY = Math.max(12, window.innerHeight - height - 12)
+        const nextX = clamp(event.clientX - dragRef.current.offsetX, 12, maxX)
+        const nextY = clamp(event.clientY - dragRef.current.offsetY, 12, maxY)
+        setToolPos({ x: nextX, y: nextY })
+      }
     }
     const handleUp = () => {
       dragRef.current.active = false
@@ -990,6 +996,16 @@ function App() {
       window.removeEventListener('pointerup', handleUp)
     }
   }, [])
+
+  useEffect(() => {
+    const dock = toolDockRef.current
+    if (!dock) return undefined
+    const update = () => setToolDockHeight(dock.offsetHeight)
+    update()
+    const observer = new ResizeObserver(update)
+    observer.observe(dock)
+    return () => observer.disconnect()
+  }, [dockCollapsed, mode, drawSize, eraseSize, drawColor])
 
   const handleToolDragStart = (event) => {
     if (event.button !== 0) return
@@ -1121,7 +1137,7 @@ function App() {
   return (
     <div className="app">
       <div
-        className="tool-dock"
+        className={`tool-dock ${dockCollapsed ? 'collapsed' : ''}`}
         ref={toolDockRef}
         style={{ left: toolPos.x, top: toolPos.y }}
       >
@@ -1129,98 +1145,154 @@ function App() {
           <button type="button" className="tool-drag" onPointerDown={handleToolDragStart} aria-label="Drag tools">
             ⋮⋮
           </button>
-          <div className="tool-actions">
-            <button
-              type="button"
-              className={mode === 'draw' ? 'active' : ''}
-              onClick={() => setMode('draw')}
-              title="Draw (D/B)"
-            >
-              Draw
-            </button>
-            <button
-              type="button"
-              className={mode === 'erase' ? 'active' : ''}
-              onClick={() => setMode('erase')}
-              title="Erase (E)"
-            >
-              Erase
-            </button>
-            <button
-              type="button"
-              className={mode === 'pan' ? 'active' : ''}
-              onClick={() => setMode('pan')}
-              title="Pan (P/X)"
-            >
-              Pan
-            </button>
-          </div>
-        </div>
-        <div className="tool-options">
-          {mode === 'draw' && (
-            <>
-              <label className="tool-option">
-                <span>Size</span>
-                <input
-                  type="range"
-                  min="1"
-                  max="24"
-                  value={drawSize}
-                  onChange={(event) => setDrawSize(Number(event.target.value))}
-                />
-              </label>
-              <label className="tool-option">
-                <span>Color</span>
-                <input type="color" value={drawColor} onChange={(event) => setDrawColor(event.target.value)} />
-              </label>
-            </>
-          )}
-          {mode === 'erase' && (
-            <label className="tool-option">
-              <span>Size</span>
-              <input
-                type="range"
-                min="4"
-                max="48"
-                value={eraseSize}
-                onChange={(event) => setEraseSize(Number(event.target.value))}
-              />
-            </label>
-          )}
-        </div>
-        {mode === 'draw' && (
-          <div className="tool-palette" role="radiogroup" aria-label="Draw color palette">
-            <div className="palette-swatches">
-              {colorOptions.map((color) => (
-                <button
-                  key={color}
-                  type="button"
-                  className={`swatch ${drawColor === color ? 'active' : ''}`}
-                  style={{ backgroundColor: color }}
-                  onClick={() => setDrawColor(color)}
-                  role="radio"
-                  aria-checked={drawColor === color}
-                  aria-label={`Color ${color}`}
-                />
-              ))}
+          {!dockCollapsed && (
+            <div className="tool-actions">
+              <button
+                type="button"
+                className={mode === 'draw' ? 'active' : ''}
+                onClick={() => setMode('draw')}
+                title="Draw (D/B)"
+              >
+                Draw
+              </button>
+              <button
+                type="button"
+                className={mode === 'erase' ? 'active' : ''}
+                onClick={() => setMode('erase')}
+                title="Erase (E)"
+              >
+                Erase
+              </button>
+              <button
+                type="button"
+                className={mode === 'pan' ? 'active' : ''}
+                onClick={() => setMode('pan')}
+                title="Pan (P/X)"
+              >
+                Pan
+              </button>
             </div>
-            <button
-              type="button"
-              className={`current-color ${colorCopied ? 'copied' : ''}`}
-              onClick={handleCopyColor}
-              aria-label={`Copy current color ${drawColor.toUpperCase()}`}
-            >
-              <span className="current-color-chip" style={{ backgroundColor: drawColor }} />
-              <span className="current-color-text">{colorCopied ? 'Copied' : drawColor.toUpperCase()}</span>
-            </button>
-          </div>
+          )}
+          <button
+            type="button"
+            className="tool-toggle tool-toggle-chevron"
+            onClick={() => setDockCollapsed((prev) => !prev)}
+            aria-label={dockCollapsed ? 'Expand tools' : 'Collapse tools'}
+          >
+            {dockCollapsed ? '>' : '<'}
+          </button>
+        </div>
+        {!dockCollapsed && (
+          <>
+            <div className="tool-options">
+              {mode === 'draw' && (
+                <>
+                  <label className="tool-option">
+                    <span>Size</span>
+                    <input
+                      type="range"
+                      min="1"
+                      max="24"
+                      value={drawSize}
+                      onChange={(event) => setDrawSize(Number(event.target.value))}
+                    />
+                  </label>
+                  <label className="tool-option">
+                    <span>Color</span>
+                    <input type="color" value={drawColor} onChange={(event) => setDrawColor(event.target.value)} />
+                  </label>
+                </>
+              )}
+              {mode === 'erase' && (
+                <label className="tool-option">
+                  <span>Size</span>
+                  <input
+                    type="range"
+                    min="4"
+                    max="48"
+                    value={eraseSize}
+                    onChange={(event) => setEraseSize(Number(event.target.value))}
+                  />
+                </label>
+              )}
+            </div>
+            {mode === 'draw' && (
+              <div className="tool-palette" role="radiogroup" aria-label="Draw color palette">
+                <div className="palette-swatches">
+                  {colorOptions.map((color) => (
+                    <button
+                      key={color}
+                      type="button"
+                      className={`swatch ${drawColor === color ? 'active' : ''}`}
+                      style={{ backgroundColor: color }}
+                      onClick={() => setDrawColor(color)}
+                      role="radio"
+                      aria-checked={drawColor === color}
+                      aria-label={`Color ${color}`}
+                    />
+                  ))}
+                </div>
+                <button
+                  type="button"
+                  className={`current-color ${colorCopied ? 'copied' : ''}`}
+                  onClick={handleCopyColor}
+                  aria-label={`Copy current color ${drawColor.toUpperCase()}`}
+                >
+                  <span className="current-color-chip" style={{ backgroundColor: drawColor }} />
+                  <span className="current-color-text">{colorCopied ? 'Copied' : drawColor.toUpperCase()}</span>
+                </button>
+              </div>
+            )}
+            {mode === 'pan' && (
+              <div className="tool-row">
+                <button
+                  type="button"
+                  className="tool-toggle hud-toggle"
+                  onClick={() => setShowPanHud((prev) => !prev)}
+                  aria-label={showPanHud ? 'Hide pan HUD' : 'Show pan HUD'}
+                >
+                  {showPanHud ? 'Hide HUD' : 'Show HUD'}
+                </button>
+                <button
+                  type="button"
+                  className="tool-toggle history-toggle"
+                  onClick={() => setShowHistoryDock((prev) => !prev)}
+                  aria-label={showHistoryDock ? 'Hide history controls' : 'Show history controls'}
+                >
+                  {showHistoryDock ? 'Hide History' : 'Show History'}
+                </button>
+              </div>
+            )}
+          </>
         )}
       </div>
-      <div className="meta-panel">
-        <span>Zoom {zoom.toFixed(2)}x</span>
-        <span>{centerLabel}</span>
-        <span>Device {deviceIdRef.current.slice(0, 8)}</span>
-      </div>
+      {!dockCollapsed && showHistoryDock && (
+        <div
+          className="history-dock"
+          ref={historyDockRef}
+          style={{ left: toolPos.x, top: toolPos.y + toolDockHeight + 8 }}
+        >
+        {!dockCollapsed && (
+          <div className="tool-row">
+            <div className="tool-actions">
+              <button type="button" onClick={handleUndo} title="Undo (Ctrl+Z)">
+                Undo
+              </button>
+              <button type="button" onClick={handleRedo} title="Redo (Ctrl+Shift+Z)">
+                Redo
+              </button>
+            </div>
+          </div>
+        )}
+        </div>
+      )}
+      {(mode !== 'pan' || showPanHud) && (
+        <div className="meta-panel">
+          <span>Zoom {zoom.toFixed(2)}x</span>
+          <span>{centerLabel}</span>
+          <span>Device {deviceIdRef.current.slice(0, 8)}</span>
+        </div>
+      )}
       <canvas
         ref={canvasRef}
         className={`canvas ${mode === 'pan' ? (isPointerDown ? 'cursor-grabbing' : 'cursor-grab') : 'cursor-brush'}`}
@@ -1233,11 +1305,13 @@ function App() {
         onPointerLeave={handlePointerLeave}
         onContextMenu={(event) => event.preventDefault()}
       />
-      <footer className="hint">
-        {mode === 'draw' && 'Draw on the shared 10k x 10k canvas. Switch to Pan to move.'}
-        {mode === 'erase' && 'Erase mode: draw over a stroke to remove it.'}
-        {mode === 'pan' && 'Pan mode: drag to move. Wheel to zoom.'}
-      </footer>
+      {(mode !== 'pan' || showPanHud) && (
+        <footer className="hint">
+          {mode === 'draw' && 'Draw on the shared 10k x 10k canvas. Switch to Pan to move.'}
+          {mode === 'erase' && 'Erase mode: draw over a stroke to remove it.'}
+          {mode === 'pan' && 'Pan mode: drag to move. Wheel to zoom.'}
+        </footer>
+      )}
     </div>
   )
 }

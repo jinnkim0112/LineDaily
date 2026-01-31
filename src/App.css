@@ -66,6 +66,38 @@
   gap: 8px;
 }
 
+.tool-toggle {
+  border: 1px solid rgba(0, 0, 0, 0.12);
+  background: rgba(0, 0, 0, 0.04);
+  color: #111111;
+  padding: 6px 10px;
+  border-radius: 999px;
+  cursor: pointer;
+  font-size: 12px;
+}
+
+.tool-toggle.tool-toggle-chevron {
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 16px;
+  line-height: 1;
+  border-radius: 10px;
+}
+
+.hud-toggle {
+  border-style: dashed;
+  background: rgba(0, 0, 0, 0.08);
+}
+
+.history-toggle {
+  border-style: dotted;
+  background: rgba(0, 0, 0, 0.06);
+}
+
 .tool-actions button {
   border: 1px solid rgba(0, 0, 0, 0.12);
   background: rgba(0, 0, 0, 0.04);
@@ -84,6 +116,27 @@
 
 .tool-actions button:hover {
   transform: translateY(-1px);
+}
+
+.tool-dock.collapsed {
+  padding: 6px;
+  gap: 6px;
+}
+
+.history-dock {
+  position: absolute;
+  display: flex;
+  gap: 8px;
+  padding: 8px;
+  background: rgba(255, 255, 255, 0.95);
+  border: 1px solid rgba(0, 0, 0, 0.12);
+  border-radius: 14px;
+  box-shadow: 0 12px 28px rgba(0, 0, 0, 0.12);
+  z-index: 10;
+}
+
+.history-dock.collapsed {
+  padding: 6px;
 }
 
 .tool-options {
