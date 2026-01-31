@@ -1054,9 +1054,8 @@ function App() {
     }
   }
 
-  useEffect(() => {
-    if (!supabase) return undefined
-
+  const setupRealtimeChannel = () => {
+    if (!supabase) return null
     const channel = supabase
       .channel('strokes-inserts')
       .on('broadcast', { event: 'stroke_deleted' }, (payload) => {
@@ -1097,9 +1096,9 @@ function App() {
           requestRender()
         },
       )
-        .on(
-          'postgres_changes',
-          { event: 'DELETE', schema: 'public', table: 'strokes' },
+      .on(
+        'postgres_changes',
+        { event: 'DELETE', schema: 'public', table: 'strokes' },
         (payload) => {
           const row = payload.old
           if (!row?.stroke_id) return
@@ -1109,21 +1108,45 @@ function App() {
             return
           }
           locallyDeletedRef.current.delete(row.stroke_id)
-            removeStrokeById(row.stroke_id)
-            removeStrokeFromActionStack(undoStackRef.current, row.stroke_id)
-            removeStrokeFromActionStack(redoStackRef.current, row.stroke_id)
-            strokeHistoryRef.current.delete(row.stroke_id)
-          },
-        )
-        .subscribe()
+          removeStrokeById(row.stroke_id)
+          removeStrokeFromActionStack(undoStackRef.current, row.stroke_id)
+          removeStrokeFromActionStack(redoStackRef.current, row.stroke_id)
+          strokeHistoryRef.current.delete(row.stroke_id)
+        },
+      )
+      .subscribe()
 
     realtimeChannelRef.current = channel
+    return channel
+  }
+
+  useEffect(() => {
+    if (!supabase) return undefined
+    const channel = setupRealtimeChannel()
     return () => {
-      supabase.removeChannel(channel)
+      if (channel) {
+        supabase.removeChannel(channel)
+      }
       if (realtimeChannelRef.current === channel) {
         realtimeChannelRef.current = null
       }
     }
+  }, [])
+
+  useEffect(() => {
+    if (!supabase) return undefined
+    const handleVisibility = () => {
+      if (document.visibilityState !== 'visible') return
+      const existing = realtimeChannelRef.current
+      if (existing) {
+        supabase.removeChannel(existing)
+      }
+      setupRealtimeChannel()
+      loadVisibleTiles()
+      requestRender()
+    }
+    document.addEventListener('visibilitychange', handleVisibility)
+    return () => document.removeEventListener('visibilitychange', handleVisibility)
   }, [])
 
   useEffect(() => {
