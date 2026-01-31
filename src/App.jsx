@@ -402,6 +402,29 @@ function App() {
     if (removed) requestRender()
   }
 
+  const trimActionStack = (stack) => {
+    if (stack.length > 50) {
+      stack.shift()
+    }
+  }
+
+  const removeStrokeFromActionStack = (stack, strokeId) => {
+    for (let i = stack.length - 1; i >= 0; i -= 1) {
+      const action = stack[i]
+      if (!action) continue
+      if (action.type === 'draw' && action.strokeId === strokeId) {
+        stack.splice(i, 1)
+        continue
+      }
+      if (action.type === 'erase' && Array.isArray(action.entries)) {
+        action.entries = action.entries.filter((entry) => entry?.stroke?.strokeId !== strokeId)
+        if (action.entries.length === 0) {
+          stack.splice(i, 1)
+        }
+      }
+    }
+  }
+
   const deleteStrokeFromSupabase = async (strokeId, attempt = 0) => {
     if (!supabase) return
     if (deleteInFlightRef.current.has(strokeId)) return
@@ -432,40 +455,110 @@ function App() {
     })
   }
 
+  const broadcastUpsert = (strokes) => {
+    if (!supabase) return
+    const channel = realtimeChannelRef.current
+    if (!channel || strokes.length === 0) return
+    channel.send({
+      type: 'broadcast',
+      event: 'stroke_upserted',
+      payload: { strokes },
+    })
+  }
+
+  const collectStrokeEntry = (strokeId) => {
+    if (!strokeId) return null
+    let stroke = null
+    const tileCoords = []
+    tilesRef.current.forEach((tile) => {
+      if (!tile.strokeIds.has(strokeId)) return
+      tileCoords.push({ tx: tile.tx, ty: tile.ty })
+      if (!stroke) {
+        const found = tile.strokes.find((item) => item.strokeId === strokeId)
+        if (found) {
+          stroke = {
+            ...found,
+            points: found.points.map((point) => ({ x: point.x, y: point.y })),
+          }
+        }
+      }
+    })
+    if (!stroke || tileCoords.length === 0) return null
+    return { stroke, tileCoords }
+  }
+
   const handleUndo = () => {
-    const lastStrokeId = undoStackRef.current.pop()
-    if (!lastStrokeId) return
-    const entry = strokeHistoryRef.current.get(lastStrokeId)
-    if (!entry) return
-    locallyDeletedRef.current.add(lastStrokeId)
-    removeStrokeById(lastStrokeId)
-    if (supabase) {
-      pendingDeleteRef.current.add(lastStrokeId)
+    const action = undoStackRef.current.pop()
+    if (!action) return
+    if (action.type === 'draw') {
+      const entry = strokeHistoryRef.current.get(action.strokeId)
+      if (!entry) return
+      locallyDeletedRef.current.add(action.strokeId)
+      removeStrokeById(action.strokeId)
+      if (supabase) {
+        pendingDeleteRef.current.add(action.strokeId)
+      }
+      deleteStrokeFromSupabase(action.strokeId)
+      broadcastDelete([action.strokeId])
+      strokeHistoryRef.current.delete(action.strokeId)
+      redoStackRef.current.push({ type: 'draw', entry })
+      trimActionStack(redoStackRef.current)
+      console.log('went back to', action.strokeId)
+      return
     }
-    deleteStrokeFromSupabase(lastStrokeId)
-    broadcastDelete([lastStrokeId])
-    strokeHistoryRef.current.delete(lastStrokeId)
-    redoStackRef.current.push(entry)
-    if (redoStackRef.current.length > 50) {
-      redoStackRef.current.shift()
+    if (action.type === 'erase') {
+      const entries = action.entries ?? []
+      if (entries.length === 0) return
+      entries.forEach(({ stroke, tileCoords }) => {
+        if (!stroke?.strokeId) return
+        locallyDeletedRef.current.delete(stroke.strokeId)
+        addStrokeToTiles(stroke, tileCoords)
+        saveStrokeToSupabase(stroke, tileCoords)
+      })
+      broadcastUpsert(entries.map(({ stroke }) => stroke))
+      redoStackRef.current.push({ type: 'erase', entries })
+      trimActionStack(redoStackRef.current)
+      requestRender()
     }
-    console.log('went back to', lastStrokeId)
   }
 
   const handleRedo = () => {
-    const entry = redoStackRef.current.pop()
-    if (!entry) return
-    const { stroke, tileCoords } = entry
-    locallyDeletedRef.current.delete(stroke.strokeId)
-    addStrokeToTiles(stroke, tileCoords)
-    saveStrokeToSupabase(stroke, tileCoords)
-    strokeHistoryRef.current.set(stroke.strokeId, entry)
-    undoStackRef.current.push(stroke.strokeId)
-    if (undoStackRef.current.length > 50) {
-      undoStackRef.current.shift()
+    const action = redoStackRef.current.pop()
+    if (!action) return
+    if (action.type === 'draw') {
+      const entry = action.entry
+      if (!entry) return
+      const { stroke, tileCoords } = entry
+      locallyDeletedRef.current.delete(stroke.strokeId)
+      addStrokeToTiles(stroke, tileCoords)
+      saveStrokeToSupabase(stroke, tileCoords)
+      strokeHistoryRef.current.set(stroke.strokeId, entry)
+      undoStackRef.current.push({ type: 'draw', strokeId: stroke.strokeId })
+      trimActionStack(undoStackRef.current)
+      broadcastUpsert([stroke])
+      console.log('went front to', stroke.strokeId)
+      requestRender()
+      return
     }
-    console.log('went front to', stroke.strokeId)
-    requestRender()
+    if (action.type === 'erase') {
+      const entries = action.entries ?? []
+      if (entries.length === 0) return
+      const deletedIds = []
+      entries.forEach(({ stroke }) => {
+        if (!stroke?.strokeId) return
+        locallyDeletedRef.current.add(stroke.strokeId)
+        removeStrokeById(stroke.strokeId)
+        if (supabase) {
+          pendingDeleteRef.current.add(stroke.strokeId)
+        }
+        deleteStrokeFromSupabase(stroke.strokeId)
+        deletedIds.push(stroke.strokeId)
+      })
+      broadcastDelete(deletedIds)
+      undoStackRef.current.push({ type: 'erase', entries })
+      trimActionStack(undoStackRef.current)
+      requestRender()
+    }
   }
 
   const hitTestStroke = (stroke, point, radius) => {
@@ -505,11 +598,22 @@ function App() {
         })
       }
     }
+    const entries = []
     toDelete.forEach((strokeId) => {
+      const entry = collectStrokeEntry(strokeId)
+      if (entry) entries.push(entry)
       locallyDeletedRef.current.add(strokeId)
       removeStrokeById(strokeId)
+      if (supabase) {
+        pendingDeleteRef.current.add(strokeId)
+      }
       deleteStrokeFromSupabase(strokeId)
     })
+    if (entries.length > 0) {
+      undoStackRef.current.push({ type: 'erase', entries })
+      trimActionStack(undoStackRef.current)
+      redoStackRef.current.length = 0
+    }
     broadcastDelete(toDelete)
   }
 
@@ -658,10 +762,8 @@ function App() {
         const coords = addStroke(stroke)
         saveStrokeToSupabase(stroke, coords)
         if (stroke.strokeId && stroke.userId === deviceIdRef.current) {
-          undoStackRef.current.push(stroke.strokeId)
-          if (undoStackRef.current.length > 50) {
-            undoStackRef.current.shift()
-          }
+          undoStackRef.current.push({ type: 'draw', strokeId: stroke.strokeId })
+          trimActionStack(undoStackRef.current)
           redoStackRef.current.length = 0
           const entry = { stroke: { ...stroke }, tileCoords: coords }
           strokeHistoryRef.current.set(stroke.strokeId, entry)
@@ -878,13 +980,20 @@ function App() {
           if (!strokeId) return
           locallyDeletedRef.current.add(strokeId)
           removeStrokeById(strokeId)
-          const index = undoStackRef.current.lastIndexOf(strokeId)
-          if (index >= 0) {
-            undoStackRef.current.splice(index, 1)
-          }
+          removeStrokeFromActionStack(undoStackRef.current, strokeId)
+          removeStrokeFromActionStack(redoStackRef.current, strokeId)
           strokeHistoryRef.current.delete(strokeId)
-          redoStackRef.current = redoStackRef.current.filter((entry) => entry.stroke.strokeId !== strokeId)
         })
+      })
+      .on('broadcast', { event: 'stroke_upserted' }, (payload) => {
+        const strokes = payload?.payload?.strokes ?? []
+        strokes.forEach((stroke) => {
+          if (!stroke?.strokeId) return
+          locallyDeletedRef.current.delete(stroke.strokeId)
+          const coords = addStroke(stroke)
+          strokeHistoryRef.current.set(stroke.strokeId, { stroke: { ...stroke }, tileCoords: coords })
+        })
+        if (strokes.length > 0) requestRender()
       })
       .on(
         'postgres_changes',
@@ -915,16 +1024,13 @@ function App() {
             return
           }
           locallyDeletedRef.current.delete(row.stroke_id)
-          removeStrokeById(row.stroke_id)
-            const index = undoStackRef.current.lastIndexOf(row.stroke_id)
-            if (index >= 0) {
-              undoStackRef.current.splice(index, 1)
-            }
+            removeStrokeById(row.stroke_id)
+            removeStrokeFromActionStack(undoStackRef.current, row.stroke_id)
+            removeStrokeFromActionStack(redoStackRef.current, row.stroke_id)
             strokeHistoryRef.current.delete(row.stroke_id)
-            redoStackRef.current = redoStackRef.current.filter((entry) => entry.stroke.strokeId !== row.stroke_id)
-        },
-      )
-      .subscribe()
+          },
+        )
+        .subscribe()
 
     realtimeChannelRef.current = channel
     return () => {
