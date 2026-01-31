@@ -105,6 +105,7 @@ function App() {
   const strokeHistoryRef = useRef(new Map())
   const pendingDeleteRef = useRef(new Set())
   const locallyDeletedRef = useRef(new Set())
+  const realtimeChannelRef = useRef(null)
   const [mode, setMode] = useState('draw')
   const [zoom, setZoom] = useState(1)
   const [centerLabel, setCenterLabel] = useState('Center 0.0, 0.0')
@@ -420,6 +421,17 @@ function App() {
     deleteInFlightRef.current.delete(strokeId)
   }
 
+  const broadcastDelete = (strokeIds) => {
+    if (!supabase) return
+    const channel = realtimeChannelRef.current
+    if (!channel || strokeIds.length === 0) return
+    channel.send({
+      type: 'broadcast',
+      event: 'stroke_deleted',
+      payload: { strokeIds },
+    })
+  }
+
   const handleUndo = () => {
     const lastStrokeId = undoStackRef.current.pop()
     if (!lastStrokeId) return
@@ -431,6 +443,7 @@ function App() {
       pendingDeleteRef.current.add(lastStrokeId)
     }
     deleteStrokeFromSupabase(lastStrokeId)
+    broadcastDelete([lastStrokeId])
     strokeHistoryRef.current.delete(lastStrokeId)
     redoStackRef.current.push(entry)
     if (redoStackRef.current.length > 50) {
@@ -493,9 +506,11 @@ function App() {
       }
     }
     toDelete.forEach((strokeId) => {
+      locallyDeletedRef.current.add(strokeId)
       removeStrokeById(strokeId)
       deleteStrokeFromSupabase(strokeId)
     })
+    broadcastDelete(toDelete)
   }
 
   const handlePointerDown = (event) => {
@@ -744,7 +759,7 @@ function App() {
           strokeId: row.stroke_id,
           userId: row.user_id,
           points: row.points,
-          color: '#000000',
+          color: row.color ?? '#000000',
           width: row.width,
         }
         addStrokeToTiles(stroke, [{ tx: row.tile_x, ty: row.tile_y }])
@@ -857,6 +872,20 @@ function App() {
 
     const channel = supabase
       .channel('strokes-inserts')
+      .on('broadcast', { event: 'stroke_deleted' }, (payload) => {
+        const ids = payload?.payload?.strokeIds ?? []
+        ids.forEach((strokeId) => {
+          if (!strokeId) return
+          locallyDeletedRef.current.add(strokeId)
+          removeStrokeById(strokeId)
+          const index = undoStackRef.current.lastIndexOf(strokeId)
+          if (index >= 0) {
+            undoStackRef.current.splice(index, 1)
+          }
+          strokeHistoryRef.current.delete(strokeId)
+          redoStackRef.current = redoStackRef.current.filter((entry) => entry.stroke.strokeId !== strokeId)
+        })
+      })
       .on(
         'postgres_changes',
         { event: 'INSERT', schema: 'public', table: 'strokes' },
@@ -867,7 +896,7 @@ function App() {
             strokeId: row.stroke_id,
             userId: row.user_id,
             points: row.points,
-            color: '#000000',
+            color: row.color ?? '#000000',
             width: row.width,
           }
           addStrokeToTiles(stroke, [{ tx: row.tile_x, ty: row.tile_y }])
@@ -893,12 +922,16 @@ function App() {
             }
             strokeHistoryRef.current.delete(row.stroke_id)
             redoStackRef.current = redoStackRef.current.filter((entry) => entry.stroke.strokeId !== row.stroke_id)
-          },
-        )
-        .subscribe()
+        },
+      )
+      .subscribe()
 
+    realtimeChannelRef.current = channel
     return () => {
       supabase.removeChannel(channel)
+      if (realtimeChannelRef.current === channel) {
+        realtimeChannelRef.current = null
+      }
     }
   }, [])
 
