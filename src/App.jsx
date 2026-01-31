@@ -42,6 +42,19 @@ function perpendicularDistance(point, lineStart, lineEnd) {
   return distance(point, proj)
 }
 
+function distancePointToSegment(point, lineStart, lineEnd) {
+  const dx = lineEnd.x - lineStart.x
+  const dy = lineEnd.y - lineStart.y
+  if (dx === 0 && dy === 0) return distance(point, lineStart)
+  let t = ((point.x - lineStart.x) * dx + (point.y - lineStart.y) * dy) / (dx * dx + dy * dy)
+  t = clamp(t, 0, 1)
+  const proj = {
+    x: lineStart.x + t * dx,
+    y: lineStart.y + t * dy,
+  }
+  return distance(point, proj)
+}
+
 function rdpSimplify(points, epsilon) {
   if (points.length <= 2) return points
   let maxDist = 0
@@ -78,13 +91,31 @@ function App() {
   const loadingTilesRef = useRef(new Set())
   const viewRef = useRef({ x: 0, y: 0, scale: 1 })
   const rafRef = useRef(null)
-  const pointerRef = useRef({ drawing: false, panning: false, last: null })
+  const pointerRef = useRef({ drawing: false, panning: false, erasing: false, last: null })
   const currentStrokeRef = useRef(null)
   const deviceIdRef = useRef(getDeviceId())
   const loadTimerRef = useRef(null)
+  const deleteInFlightRef = useRef(new Set())
+  const toolDockRef = useRef(null)
+  const dragRef = useRef({ active: false, offsetX: 0, offsetY: 0 })
+  const cursorRef = useRef({ active: false, x: 0, y: 0 })
+  const copyTimeoutRef = useRef(null)
+  const undoStackRef = useRef([])
+  const redoStackRef = useRef([])
+  const strokeHistoryRef = useRef(new Map())
+  const pendingDeleteRef = useRef(new Set())
+  const locallyDeletedRef = useRef(new Set())
   const [mode, setMode] = useState('draw')
   const [zoom, setZoom] = useState(1)
+  const [centerLabel, setCenterLabel] = useState('Center 0.0, 0.0')
   const [realtimeEnabled] = useState(Boolean(supabase))
+  const [toolPos, setToolPos] = useState({ x: 16, y: 16 })
+  const [drawColor, setDrawColor] = useState('#111111')
+  const [drawSize, setDrawSize] = useState(3)
+  const [eraseSize, setEraseSize] = useState(18)
+  const [isPointerDown, setIsPointerDown] = useState(false)
+  const [colorCopied, setColorCopied] = useState(false)
+  const colorOptions = ['#111111', '#2b2b2b', '#5a5a5a', '#8a8a8a', '#c0392b', '#e67e22', '#f1c40f', '#27ae60', '#2980b9', '#8e44ad']
 
   const requestRender = () => {
     if (rafRef.current) return
@@ -224,6 +255,10 @@ function App() {
     const view = viewRef.current
     const viewWidthWorld = width / view.scale
     const viewHeightWorld = height / view.scale
+    const centerWorld = {
+      x: view.x + viewWidthWorld / 2,
+      y: view.y + viewHeightWorld / 2,
+    }
 
     const startX = Math.floor(view.x / TILE_SIZE)
     const startY = Math.floor(view.y / TILE_SIZE)
@@ -277,27 +312,6 @@ function App() {
       WORLD_SIZE * view.scale,
     )
 
-    // Debug: center coordinates overlay
-    const centerWorld = {
-      x: view.x + viewWidthWorld / 2,
-      y: view.y + viewHeightWorld / 2,
-    }
-    const centerLabel = `Center: ${centerWorld.x.toFixed(1)}, ${centerWorld.y.toFixed(1)}`
-    ctx.font = '12px "Space Grotesk", "Segoe UI", sans-serif'
-    const paddingX = 10
-    const paddingY = 6
-    const textWidth = ctx.measureText(centerLabel).width
-    const boxWidth = textWidth + paddingX * 2
-    const boxHeight = 20
-    const boxX = width - boxWidth - 12
-    const boxY = 12
-    ctx.fillStyle = 'rgba(0,0,0,0.6)'
-    ctx.fillRect(boxX, boxY, boxWidth, boxHeight)
-    ctx.fillStyle = '#ffffff'
-    ctx.textBaseline = 'middle'
-    ctx.textAlign = 'left'
-    ctx.fillText(centerLabel, boxX + paddingX, boxY + boxHeight / 2)
-
     const current = currentStrokeRef.current
     if (current && current.points.length > 0) {
       ctx.strokeStyle = current.color
@@ -312,6 +326,22 @@ function App() {
         else ctx.lineTo(screenX, screenY)
       })
       ctx.stroke()
+    }
+
+    const nextCenter = `Center ${centerWorld.x.toFixed(1)}, ${centerWorld.y.toFixed(1)}`
+    if (nextCenter !== centerLabel) {
+      setCenterLabel(nextCenter)
+    }
+
+    if (cursorRef.current.active && (mode === 'draw' || mode === 'erase')) {
+      const radius = (mode === 'draw' ? drawSize : eraseSize) / 2 * view.scale
+      ctx.save()
+      ctx.beginPath()
+      ctx.arc(cursorRef.current.x, cursorRef.current.y, radius, 0, Math.PI * 2)
+      ctx.strokeStyle = mode === 'draw' ? drawColor : 'rgba(0,0,0,0.65)'
+      ctx.lineWidth = 1
+      ctx.stroke()
+      ctx.restore()
     }
 
     scheduleVisibleLoad()
@@ -357,14 +387,137 @@ function App() {
     view.y = clamp(view.y, 0, maxY)
   }
 
+  const removeStrokeById = (strokeId) => {
+    let removed = false
+    tilesRef.current.forEach((tile) => {
+      if (!tile.strokeIds.has(strokeId)) return
+      const nextStrokes = tile.strokes.filter((stroke) => stroke.strokeId !== strokeId)
+      if (nextStrokes.length === tile.strokes.length) return
+      tile.strokes = nextStrokes
+      tile.strokeIds.delete(strokeId)
+      tile.dirty = true
+      removed = true
+    })
+    if (removed) requestRender()
+  }
+
+  const deleteStrokeFromSupabase = async (strokeId, attempt = 0) => {
+    if (!supabase) return
+    if (deleteInFlightRef.current.has(strokeId)) return
+    deleteInFlightRef.current.add(strokeId)
+    const { error } = await supabase.from('strokes').delete().eq('stroke_id', strokeId)
+    if (error) {
+      console.error('Supabase delete failed (check RLS delete policy)', error)
+      if (attempt < 2) {
+        const delay = 500 * (attempt + 1)
+        setTimeout(() => {
+          deleteInFlightRef.current.delete(strokeId)
+          deleteStrokeFromSupabase(strokeId, attempt + 1)
+        }, delay)
+        return
+      }
+    }
+    deleteInFlightRef.current.delete(strokeId)
+  }
+
+  const handleUndo = () => {
+    const lastStrokeId = undoStackRef.current.pop()
+    if (!lastStrokeId) return
+    const entry = strokeHistoryRef.current.get(lastStrokeId)
+    if (!entry) return
+    locallyDeletedRef.current.add(lastStrokeId)
+    removeStrokeById(lastStrokeId)
+    if (supabase) {
+      pendingDeleteRef.current.add(lastStrokeId)
+    }
+    deleteStrokeFromSupabase(lastStrokeId)
+    strokeHistoryRef.current.delete(lastStrokeId)
+    redoStackRef.current.push(entry)
+    if (redoStackRef.current.length > 50) {
+      redoStackRef.current.shift()
+    }
+    console.log('went back to', lastStrokeId)
+  }
+
+  const handleRedo = () => {
+    const entry = redoStackRef.current.pop()
+    if (!entry) return
+    const { stroke, tileCoords } = entry
+    locallyDeletedRef.current.delete(stroke.strokeId)
+    addStrokeToTiles(stroke, tileCoords)
+    saveStrokeToSupabase(stroke, tileCoords)
+    strokeHistoryRef.current.set(stroke.strokeId, entry)
+    undoStackRef.current.push(stroke.strokeId)
+    if (undoStackRef.current.length > 50) {
+      undoStackRef.current.shift()
+    }
+    console.log('went front to', stroke.strokeId)
+    requestRender()
+  }
+
+  const hitTestStroke = (stroke, point, radius) => {
+    if (!stroke.points || stroke.points.length === 0) return false
+    if (stroke.points.length === 1) {
+      return distance(stroke.points[0], point) <= radius
+    }
+    for (let i = 0; i < stroke.points.length - 1; i += 1) {
+      const a = stroke.points[i]
+      const b = stroke.points[i + 1]
+      const d = distancePointToSegment(point, a, b)
+      if (d <= radius) return true
+    }
+    return false
+  }
+
+  const eraseAtPoint = (worldPoint) => {
+    const view = viewRef.current
+    const worldRadius = (eraseSize / 2) / view.scale
+    const minX = Math.floor((worldPoint.x - worldRadius) / TILE_SIZE)
+    const minY = Math.floor((worldPoint.y - worldRadius) / TILE_SIZE)
+    const maxX = Math.floor((worldPoint.x + worldRadius) / TILE_SIZE)
+    const maxY = Math.floor((worldPoint.y + worldRadius) / TILE_SIZE)
+    const visited = new Set()
+    const toDelete = []
+    for (let ty = minY; ty <= maxY; ty += 1) {
+      for (let tx = minX; tx <= maxX; tx += 1) {
+        const tile = tilesRef.current.get(tileKey(tx, ty))
+        if (!tile) continue
+        tile.strokes.forEach((stroke) => {
+          if (!stroke.strokeId || visited.has(stroke.strokeId)) return
+          visited.add(stroke.strokeId)
+          const radius = worldRadius + (stroke.width ?? STROKE_WIDTH) / 2
+          if (hitTestStroke(stroke, worldPoint, radius)) {
+            toDelete.push(stroke.strokeId)
+          }
+        })
+      }
+    }
+    toDelete.forEach((strokeId) => {
+      removeStrokeById(strokeId)
+      deleteStrokeFromSupabase(strokeId)
+    })
+  }
+
   const handlePointerDown = (event) => {
     const canvas = canvasRef.current
     if (!canvas) return
+    if (document.activeElement !== canvas) {
+      canvas.focus()
+    }
     canvas.setPointerCapture(event.pointerId)
+    setIsPointerDown(true)
     const isPan = mode === 'pan' || event.button === 1 || event.button === 2
     const point = getCanvasPoint(event)
+    cursorRef.current = { active: true, x: point.x, y: point.y }
     if (isPan) {
-      pointerRef.current = { panning: true, drawing: false, last: point }
+      pointerRef.current = { panning: true, drawing: false, erasing: false, last: point }
+      return
+    }
+
+    if (mode === 'erase') {
+      const worldPoint = screenToWorld(point)
+      pointerRef.current = { panning: false, drawing: false, erasing: true, last: worldPoint }
+      eraseAtPoint(worldPoint)
       return
     }
 
@@ -372,16 +525,18 @@ function App() {
     currentStrokeRef.current = {
       strokeId: crypto.randomUUID(),
       userId: deviceIdRef.current,
-      color: '#000000',
-      width: STROKE_WIDTH,
+      color: drawColor,
+      width: drawSize,
       points: [worldPoint],
     }
-    pointerRef.current = { drawing: true, panning: false, last: worldPoint }
+    pointerRef.current = { drawing: true, panning: false, erasing: false, last: worldPoint }
   }
 
   const handlePointerMove = (event) => {
-    if (!pointerRef.current.drawing && !pointerRef.current.panning) return
     const point = getCanvasPoint(event)
+    cursorRef.current = { active: true, x: point.x, y: point.y }
+    requestRender()
+    if (!pointerRef.current.drawing && !pointerRef.current.panning && !pointerRef.current.erasing) return
 
     if (pointerRef.current.panning) {
       const view = viewRef.current
@@ -396,6 +551,11 @@ function App() {
     }
 
     const worldPoint = screenToWorld(point)
+    if (pointerRef.current.erasing) {
+      pointerRef.current.last = worldPoint
+      eraseAtPoint(worldPoint)
+      return
+    }
     const stroke = currentStrokeRef.current
     if (!stroke) return
     const lastPoint = stroke.points[stroke.points.length - 1]
@@ -404,6 +564,57 @@ function App() {
     pointerRef.current.last = worldPoint
     requestRender()
   }
+
+  const handleCanvasKeyDown = (event) => {
+    if (event.metaKey || event.ctrlKey) {
+      const key = event.key.toLowerCase()
+      if (key === 'z') {
+        event.preventDefault()
+        event.stopPropagation()
+        if (event.shiftKey) {
+          handleRedo()
+        } else {
+          handleUndo()
+        }
+      }
+      return
+    }
+    if (event.altKey) return
+    const key = event.key.toLowerCase()
+    if (key === 'd' || key === 'b') {
+      event.preventDefault()
+      setMode('draw')
+      return
+    }
+    if (key === 'e') {
+      event.preventDefault()
+      setMode('erase')
+      return
+    }
+    if (key === 'p' || key === 'x') {
+      event.preventDefault()
+      setMode('pan')
+    }
+  }
+
+  useEffect(() => {
+    const handleGlobalKeyDown = (event) => {
+      if (!event.ctrlKey && !event.metaKey) return
+      if (event.key.toLowerCase() !== 'z') return
+      if (event.defaultPrevented) return
+      const target = event.target
+      const tagName = target?.tagName
+      if (tagName === 'INPUT' || tagName === 'TEXTAREA' || target?.isContentEditable) return
+      event.preventDefault()
+      if (event.shiftKey) {
+        handleRedo()
+      } else {
+        handleUndo()
+      }
+    }
+    window.addEventListener('keydown', handleGlobalKeyDown)
+    return () => window.removeEventListener('keydown', handleGlobalKeyDown)
+  }, [])
 
   const saveStrokeToSupabase = async (stroke, tileCoords) => {
     if (!supabase) return
@@ -431,11 +642,28 @@ function App() {
         stroke.points = simplified
         const coords = addStroke(stroke)
         saveStrokeToSupabase(stroke, coords)
+        if (stroke.strokeId && stroke.userId === deviceIdRef.current) {
+          undoStackRef.current.push(stroke.strokeId)
+          if (undoStackRef.current.length > 50) {
+            undoStackRef.current.shift()
+          }
+          redoStackRef.current.length = 0
+          const entry = { stroke: { ...stroke }, tileCoords: coords }
+          strokeHistoryRef.current.set(stroke.strokeId, entry)
+          console.log('draw id', stroke.strokeId)
+        }
       }
     }
-    pointerRef.current = { drawing: false, panning: false, last: null }
+    pointerRef.current = { drawing: false, panning: false, erasing: false, last: null }
+    setIsPointerDown(false)
     currentStrokeRef.current = null
     requestRender()
+  }
+
+  const handlePointerLeave = () => {
+    cursorRef.current = { active: false, x: 0, y: 0 }
+    setIsPointerDown(false)
+    handlePointerUp()
   }
 
   const handleWheel = (event) => {
@@ -511,6 +739,7 @@ function App() {
       }
 
       data.forEach((row) => {
+        if (locallyDeletedRef.current.has(row.stroke_id)) return
         const stroke = {
           strokeId: row.stroke_id,
           userId: row.user_id,
@@ -542,12 +771,86 @@ function App() {
   }, [])
 
   useEffect(() => {
+    requestRender()
+  }, [mode, drawColor, drawSize, eraseSize])
+
+  useEffect(() => {
     const canvas = canvasRef.current
     if (!canvas) return undefined
     const onWheel = (event) => handleWheel(event)
     canvas.addEventListener('wheel', onWheel, { passive: false })
     return () => canvas.removeEventListener('wheel', onWheel)
   }, [])
+
+  useEffect(() => {
+    const handleMove = (event) => {
+      if (!dragRef.current.active) return
+      const dock = toolDockRef.current
+      const width = dock?.offsetWidth ?? 0
+      const height = dock?.offsetHeight ?? 0
+      const maxX = Math.max(12, window.innerWidth - width - 12)
+      const maxY = Math.max(12, window.innerHeight - height - 12)
+      const nextX = clamp(event.clientX - dragRef.current.offsetX, 12, maxX)
+      const nextY = clamp(event.clientY - dragRef.current.offsetY, 12, maxY)
+      setToolPos({ x: nextX, y: nextY })
+    }
+    const handleUp = () => {
+      dragRef.current.active = false
+    }
+    window.addEventListener('pointermove', handleMove)
+    window.addEventListener('pointerup', handleUp)
+    return () => {
+      window.removeEventListener('pointermove', handleMove)
+      window.removeEventListener('pointerup', handleUp)
+    }
+  }, [])
+
+  const handleToolDragStart = (event) => {
+    if (event.button !== 0) return
+    const dock = toolDockRef.current
+    if (!dock) return
+    const rect = dock.getBoundingClientRect()
+    dragRef.current = {
+      active: true,
+      offsetX: event.clientX - rect.left,
+      offsetY: event.clientY - rect.top,
+    }
+  }
+
+  const handleCopyColor = async () => {
+    const color = drawColor.toUpperCase()
+    const markCopied = () => {
+      setColorCopied(true)
+      if (copyTimeoutRef.current) {
+        clearTimeout(copyTimeoutRef.current)
+      }
+      copyTimeoutRef.current = setTimeout(() => {
+        setColorCopied(false)
+      }, 1200)
+    }
+
+    try {
+      if (navigator.clipboard && window.isSecureContext) {
+        await navigator.clipboard.writeText(color)
+        markCopied()
+        return
+      }
+    } catch (error) {
+      // fall back to the legacy copy flow
+    }
+
+    const textarea = document.createElement('textarea')
+    textarea.value = color
+    textarea.style.position = 'fixed'
+    textarea.style.opacity = '0'
+    document.body.appendChild(textarea)
+    textarea.select()
+    const success = document.execCommand('copy')
+    document.body.removeChild(textarea)
+    if (success) {
+      markCopied()
+    }
+  }
 
   useEffect(() => {
     if (!supabase) return undefined
@@ -559,6 +862,7 @@ function App() {
         { event: 'INSERT', schema: 'public', table: 'strokes' },
         (payload) => {
           const row = payload.new
+          if (locallyDeletedRef.current.has(row.stroke_id)) return
           const stroke = {
             strokeId: row.stroke_id,
             userId: row.user_id,
@@ -570,42 +874,160 @@ function App() {
           requestRender()
         },
       )
-      .subscribe()
+        .on(
+          'postgres_changes',
+          { event: 'DELETE', schema: 'public', table: 'strokes' },
+        (payload) => {
+          const row = payload.old
+          if (!row?.stroke_id) return
+          if (pendingDeleteRef.current.has(row.stroke_id)) {
+            pendingDeleteRef.current.delete(row.stroke_id)
+            locallyDeletedRef.current.delete(row.stroke_id)
+            return
+          }
+          locallyDeletedRef.current.delete(row.stroke_id)
+          removeStrokeById(row.stroke_id)
+            const index = undoStackRef.current.lastIndexOf(row.stroke_id)
+            if (index >= 0) {
+              undoStackRef.current.splice(index, 1)
+            }
+            strokeHistoryRef.current.delete(row.stroke_id)
+            redoStackRef.current = redoStackRef.current.filter((entry) => entry.stroke.strokeId !== row.stroke_id)
+          },
+        )
+        .subscribe()
 
     return () => {
       supabase.removeChannel(channel)
     }
   }, [])
 
+  useEffect(() => {
+    return () => {
+      if (copyTimeoutRef.current) {
+        clearTimeout(copyTimeoutRef.current)
+      }
+    }
+  }, [])
+
   return (
     <div className="app">
-      <header className="toolbar">
-        <div className="title">Line Daily</div>
-        <div className="actions">
-          <button type="button" className={mode === 'draw' ? 'active' : ''} onClick={() => setMode('draw')}>
-            Draw
+      <div
+        className="tool-dock"
+        ref={toolDockRef}
+        style={{ left: toolPos.x, top: toolPos.y }}
+      >
+        <div className="tool-row">
+          <button type="button" className="tool-drag" onPointerDown={handleToolDragStart} aria-label="Drag tools">
+            ⋮⋮
           </button>
-          <button type="button" className={mode === 'pan' ? 'active' : ''} onClick={() => setMode('pan')}>
-            Pan
-          </button>
+          <div className="tool-actions">
+            <button
+              type="button"
+              className={mode === 'draw' ? 'active' : ''}
+              onClick={() => setMode('draw')}
+              title="Draw (D/B)"
+            >
+              Draw
+            </button>
+            <button
+              type="button"
+              className={mode === 'erase' ? 'active' : ''}
+              onClick={() => setMode('erase')}
+              title="Erase (E)"
+            >
+              Erase
+            </button>
+            <button
+              type="button"
+              className={mode === 'pan' ? 'active' : ''}
+              onClick={() => setMode('pan')}
+              title="Pan (P/X)"
+            >
+              Pan
+            </button>
+          </div>
         </div>
-        <div className="meta">
-          <span>Zoom {zoom.toFixed(2)}x</span>
-          <span>Device {deviceIdRef.current.slice(0, 8)}</span>
-          <span>{realtimeEnabled ? 'Realtime on' : 'Realtime off'}</span>
+        <div className="tool-options">
+          {mode === 'draw' && (
+            <>
+              <label className="tool-option">
+                <span>Size</span>
+                <input
+                  type="range"
+                  min="1"
+                  max="24"
+                  value={drawSize}
+                  onChange={(event) => setDrawSize(Number(event.target.value))}
+                />
+              </label>
+              <label className="tool-option">
+                <span>Color</span>
+                <input type="color" value={drawColor} onChange={(event) => setDrawColor(event.target.value)} />
+              </label>
+            </>
+          )}
+          {mode === 'erase' && (
+            <label className="tool-option">
+              <span>Size</span>
+              <input
+                type="range"
+                min="4"
+                max="48"
+                value={eraseSize}
+                onChange={(event) => setEraseSize(Number(event.target.value))}
+              />
+            </label>
+          )}
         </div>
-      </header>
+        {mode === 'draw' && (
+          <div className="tool-palette" role="radiogroup" aria-label="Draw color palette">
+            <div className="palette-swatches">
+              {colorOptions.map((color) => (
+                <button
+                  key={color}
+                  type="button"
+                  className={`swatch ${drawColor === color ? 'active' : ''}`}
+                  style={{ backgroundColor: color }}
+                  onClick={() => setDrawColor(color)}
+                  role="radio"
+                  aria-checked={drawColor === color}
+                  aria-label={`Color ${color}`}
+                />
+              ))}
+            </div>
+            <button
+              type="button"
+              className={`current-color ${colorCopied ? 'copied' : ''}`}
+              onClick={handleCopyColor}
+              aria-label={`Copy current color ${drawColor.toUpperCase()}`}
+            >
+              <span className="current-color-chip" style={{ backgroundColor: drawColor }} />
+              <span className="current-color-text">{colorCopied ? 'Copied' : drawColor.toUpperCase()}</span>
+            </button>
+          </div>
+        )}
+      </div>
+      <div className="meta-panel">
+        <span>Zoom {zoom.toFixed(2)}x</span>
+        <span>{centerLabel}</span>
+        <span>Device {deviceIdRef.current.slice(0, 8)}</span>
+      </div>
       <canvas
         ref={canvasRef}
-        className="canvas"
+        className={`canvas ${mode === 'pan' ? (isPointerDown ? 'cursor-grabbing' : 'cursor-grab') : 'cursor-brush'}`}
+        tabIndex={0}
+        onKeyDown={handleCanvasKeyDown}
         onPointerDown={handlePointerDown}
         onPointerMove={handlePointerMove}
         onPointerUp={handlePointerUp}
-        onPointerLeave={handlePointerUp}
+        onPointerLeave={handlePointerLeave}
         onContextMenu={(event) => event.preventDefault()}
       />
       <footer className="hint">
-        {mode === 'draw' ? 'Draw on the shared 10k x 10k canvas. Switch to Pan to move.' : 'Pan mode: drag to move. Wheel to zoom.'}
+        {mode === 'draw' && 'Draw on the shared 10k x 10k canvas. Switch to Pan to move.'}
+        {mode === 'erase' && 'Erase mode: draw over a stroke to remove it.'}
+        {mode === 'pan' && 'Pan mode: drag to move. Wheel to zoom.'}
       </footer>
     </div>
   )

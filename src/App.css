@@ -10,40 +10,62 @@
   width: 100%;
   height: 100%;
   display: block;
-  cursor: crosshair;
 }
 
-.toolbar {
+.canvas.cursor-brush {
+  cursor: none;
+}
+
+.canvas.cursor-grab {
+  cursor: grab;
+}
+
+.canvas.cursor-grabbing {
+  cursor: grabbing;
+}
+
+.tool-dock {
   position: absolute;
-  top: 16px;
-  left: 16px;
-  right: 16px;
   display: flex;
-  align-items: center;
-  justify-content: space-between;
-  padding: 12px 16px;
-  background: rgba(255, 255, 255, 0.92);
-  border: 1px solid rgba(0, 0, 0, 0.08);
-  border-radius: 12px;
-  backdrop-filter: blur(10px);
+  flex-direction: column;
+  align-items: stretch;
+  gap: 8px;
+  padding: 8px;
+  background: rgba(255, 255, 255, 0.95);
+  border: 1px solid rgba(0, 0, 0, 0.12);
+  border-radius: 14px;
+  box-shadow: 0 12px 28px rgba(0, 0, 0, 0.12);
   z-index: 10;
-  gap: 12px;
+  user-select: none;
   flex-wrap: wrap;
 }
 
-.title {
-  font-size: 18px;
-  font-weight: 600;
-  letter-spacing: 0.02em;
-  color: #111111;
+.tool-row {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
 }
 
-.actions {
+.tool-drag {
+  border: none;
+  background: rgba(0, 0, 0, 0.06);
+  color: rgba(0, 0, 0, 0.6);
+  font-size: 14px;
+  border-radius: 10px;
+  padding: 6px 8px;
+  cursor: grab;
+}
+
+.tool-drag:active {
+  cursor: grabbing;
+}
+
+.tool-actions {
   display: flex;
   gap: 8px;
 }
 
-.actions button {
+.tool-actions button {
   border: 1px solid rgba(0, 0, 0, 0.12);
   background: rgba(0, 0, 0, 0.04);
   color: #111111;
@@ -54,20 +76,125 @@
   transition: transform 0.15s ease, background 0.15s ease;
 }
 
-.actions button.active {
+.tool-actions button.active {
   background: #111111;
   color: #ffffff;
 }
 
-.actions button:hover {
+.tool-actions button:hover {
   transform: translateY(-1px);
 }
 
-.meta {
+.tool-options {
   display: flex;
-  gap: 12px;
+  align-items: center;
+  gap: 10px;
+  padding-left: 2px;
+}
+
+.tool-option {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
   font-size: 12px;
   color: rgba(0, 0, 0, 0.6);
+}
+
+.tool-option input[type='range'] {
+  width: 110px;
+}
+
+.tool-option input[type='color'] {
+  width: 22px;
+  height: 22px;
+  border: none;
+  padding: 0;
+  background: transparent;
+  cursor: pointer;
+}
+
+.palette-swatches {
+  display: grid;
+  grid-template-columns: repeat(5, 18px);
+  gap: 6px;
+  padding-top: 2px;
+}
+
+.tool-palette {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding-left: 2px;
+}
+
+.current-color {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  border: 1px solid rgba(0, 0, 0, 0.12);
+  background: rgba(0, 0, 0, 0.04);
+  color: #111111;
+  padding: 6px 10px;
+  border-radius: 999px;
+  cursor: pointer;
+  font-size: 12px;
+  letter-spacing: 0.04em;
+  transition: transform 0.15s ease, background 0.15s ease, color 0.15s ease, border-color 0.15s ease;
+}
+
+.current-color:hover {
+  transform: translateY(-1px);
+}
+
+.current-color.copied {
+  background: #111111;
+  color: #ffffff;
+  border-color: #111111;
+}
+
+.current-color-chip {
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  border: 1px solid rgba(0, 0, 0, 0.2);
+}
+
+.current-color.copied .current-color-chip {
+  border-color: rgba(255, 255, 255, 0.5);
+}
+
+.current-color-text {
+  font-variant-numeric: tabular-nums;
+}
+
+
+.swatch {
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  border: 1px solid rgba(0, 0, 0, 0.18);
+  cursor: pointer;
+  padding: 0;
+}
+
+.swatch.active {
+  box-shadow: 0 0 0 2px rgba(0, 0, 0, 0.18);
+}
+
+.meta-panel {
+  position: absolute;
+  top: 16px;
+  right: 16px;
+  display: flex;
+  gap: 12px;
+  padding: 8px 12px;
+  background: rgba(255, 255, 255, 0.9);
+  border: 1px solid rgba(0, 0, 0, 0.08);
+  border-radius: 999px;
+  font-size: 12px;
+  color: rgba(0, 0, 0, 0.7);
+  z-index: 9;
+  flex-wrap: wrap;
 }
 
 .hint {
@@ -83,13 +210,9 @@
 }
 
 @media (max-width: 640px) {
-  .toolbar {
-    flex-direction: column;
-    align-items: flex-start;
-  }
-
-  .meta {
-    width: 100%;
-    justify-content: space-between;
+  .meta-panel {
+    right: 12px;
+    left: 12px;
+    justify-content: center;
   }
 }

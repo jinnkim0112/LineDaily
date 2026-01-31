@@ -109,4 +109,10 @@ for select using (true);
 
 create policy "public insert" on strokes
 for insert with check (true);
+
+create policy "public delete" on strokes
+for delete using (true);
+
+-- Required for realtime delete payloads to include old row data
+alter table strokes replica identity full;
 ```
