@@ -1,16 +1,56 @@
-# React + Vite
 
-This template provides a minimal setup to get React working in Vite with HMR and some ESLint rules.
+# 🖌️ Line Daily (라인 데일리)
 
-Currently, two official plugins are available:
+하나의 거대한 캔버스 위에 모든 사용자가 획을 더해가는 실시간 협업 아트 프로젝트입니다. r/place에 영감을 받아서 만들었으며, 픽셀 대신 **'선의 흐름'**에 집중합니다.
 
-- [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react) uses [Babel](https://babeljs.io/) (or [oxc](https://oxc.rs) when used in [rolldown-vite](https://vite.dev/guide/rolldown)) for Fast Refresh
-- [@vitejs/plugin-react-swc](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react-swc) uses [SWC](https://swc.rs/) for Fast Refresh
+---
 
-## React Compiler
+## 🕹️ 규칙 (The Rules)
+- **공동의 작품:** 모든 사용자는 동일한 캔버스를 공유합니다. 누군가는 예술을 만들고, 누군가는 낙서를 할 수도 있습니다.
 
-The React Compiler is not enabled on this template because of its impact on dev & build performances. To add it, see [this documentation](https://react.dev/learn/react-compiler/installation).
+**하루 그리기 구역:** 하루에 한 번, 각 사용자는 전체 1만x1만 픽셀의 거대한 캔버스 중 임의의 100x100 픽셀 구역을 선택해 그 구역 안에서만 무제한으로 선을 그릴 수 있습니다. (다음 날이 되면 새로운 100x100 구역을 선택할 수 있습니다)
 
-## Expanding the ESLint configuration
+---
 
-If you are developing a production application, we recommend using TypeScript with type-aware lint rules enabled. Check out the [TS template](https://github.com/vitejs/vite/tree/main/packages/create-vite/template-react-ts) for information on how to integrate TypeScript and [`typescript-eslint`](https://typescript-eslint.io) in your project.
+
+## 🛠️ 핵심 기술 구현 (Simplified Stack)
+- **Frontend:** React + HTML5 Canvas
+- **Real-time Logic:** Supabase Realtime (Postgres 기반 실시간 좌표 공유)
+- **State Management:** 캔버스 전체의 좌표 데이터를 배열로 관리하여 실시간 동기화
+
+---
+
+## 📐 데이터 구조 (Example)
+하나의 획(Stroke)은 다음과 같은 데이터로 구성되어 DB에 저장됩니다.
+
+```json
+{
+  "userId": "user_123",
+  "points": [[x1, y1], [x2, y2], [x3, y3]], // 선의 궤적
+  "color": "#000000",
+  "timestamp": "2026-01-31T01:18:00Z"
+}
+```
+
+---
+
+## 🚀 주요 기능
+- **Live Canvas:** 다른 사람이 긋는 획이 실시간으로 화면에 나타납니다.
+
+- **Daily Stroke Limit:** 하루에 그릴 수 있는 총 선 길이 제한(100x100 화면 크기 기준)이 적용됩니다.
+
+- **History Playback:** 첫 번째 획부터 지금까지 어떻게 변해왔는지 타임랩스로 확인합니다.
+
+---
+
+## 📦 시작하기 (Getting Started)
+1. 이 저장소를 클론합니다.
+2. Supabase 프로젝트를 생성하고, Realtime 기능을 활성화합니다.
+3. `.env` 파일에 Supabase 설정을 입력합니다.
+4. `npm install`로 의존성을 설치합니다.
+5. `npm start`로 개발 서버를 실행합니다.
+
+---
+
+## 📝 라이선스
+MIT License
